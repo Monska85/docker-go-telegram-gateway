@@ -1,0 +1,114 @@
+name: Docker
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "*"
+
+env:
+  BRANCH_FOR_LATEST: main
+  REGISTRY: ghcr.io
+  IMAGE_NAME: telegram-gateway
+  PLATFORMS: "linux/amd64,linux/arm64"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    if: github.ref != 'refs/heads/main' && ! startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # set latest tag for main branch
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', env.BRANCH_FOR_LATEST) }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/') }}
+            type=sha,format=long,prefix=
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          load: true
+          push: false
+          context: .
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    if: contains('["refs/heads/main", "refs/heads/master"]', github.ref) || startsWith(github.ref, 'refs/tags/')
+    permissions:
+      packages: write
+      security-events: write
+      # only required for workflows in private repositories
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # We use commit sha here to be as safe as possible with credentials.
+      - name: Log in to the Container registry
+        uses: docker/login-action@e92390c5fb421da1463c202d546fed0ec5c39f20
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # set latest tag for main branch
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', env.BRANCH_FOR_LATEST) }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/') }}
+            type=sha,format=long,prefix=
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          platforms: ${{ env.PLATFORMS }}
+          context: .
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Repository owner to lower case
+        id: repository_owner_lower
+        run: echo "value=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ steps.repository_owner_lower.outputs.value }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: "sarif"
+          output: "trivy-results.sarif"
+          ignore-unfixed: true
+          severity: "CRITICAL,HIGH"
+          vuln-type: "os,library"
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: "trivy-results.sarif"
+
+      - name: Clean up untagged Docker images
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ env.IMAGE_NAME }}
+          package-type: "container"
+          delete-only-untagged-versions: "true"

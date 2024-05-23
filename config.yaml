@@ -1,0 +1,6 @@
+# This file is a work in progress and is not yet complete.
+messageRouter:
+  default:
+    patterns:
+      - "*": "http://localhost:8080"
+      - "/^add/": "http://localhost:8081"
